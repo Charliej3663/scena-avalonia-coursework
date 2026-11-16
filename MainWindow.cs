@@ -385,6 +385,26 @@ public sealed class MainWindow : Window
     {
         _content.Children.Clear();
         Heading("Ваша корзина", "Участие в программе подтверждается после оформления заявки.");
+        var invalidEntries = _cart
+            .Where(entry =>
+            {
+                var course = Courses.FirstOrDefault(x => x.Id == entry.Key.Course);
+                return course is null || entry.Key.Group < 0 || entry.Key.Group >= course.Schedule.Length || entry.Value <= 0;
+            })
+            .Select(entry => entry.Key)
+            .ToArray();
+        foreach (var key in invalidEntries) _cart.Remove(key);
+        if (invalidEntries.Length > 0)
+        {
+            SavePreferences();
+            UpdateCartLabel();
+            _content.Children.Add(new TextBlock
+            {
+                Text = "Сохранённый список устарел и был обновлён. Выберите занятия заново.",
+                Foreground = Brush("#8B641F"),
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
         if (_cart.Count == 0)
         {
             var empty = new StackPanel { Spacing = 10 }; empty.Children.Add(new TextBlock { Text = "Корзина пока пуста", FontFamily = "Georgia", FontSize = 22, Foreground = Brush("#20352A") }); empty.Children.Add(new TextBlock { Text = "Посмотрите коллекцию занятий и выберите группу, которая вам подходит." });
@@ -401,7 +421,9 @@ public sealed class MainWindow : Window
         var total = 0;
         foreach (var entry in _cart.ToArray())
         {
-            var c = Courses[entry.Key.Course]; total += c.Price * entry.Value;
+            var c = Courses.FirstOrDefault(x => x.Id == entry.Key.Course);
+            if (c is null || entry.Key.Group < 0 || entry.Key.Group >= c.Schedule.Length || entry.Value <= 0) continue;
+            total += c.Price * entry.Value;
             var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"), ColumnSpacing = 8 };
             row.Children.Add(new StackPanel { Spacing = 4, Children = { new TextBlock { Text = c.Title, FontFamily = "Georgia", FontSize = 17, Foreground = Brush("#20352A"), TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = $"Группа {entry.Key.Group + 1} · {c.Schedule[entry.Key.Group]} · {Money(c.Price)} за программу", FontSize = 12, Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap } } });
             var minus = MakeButton("−", false); Grid.SetColumn(minus, 1); minus.Click += (_, _) => { if (entry.Value <= 1) _cart.Remove(entry.Key); else _cart[entry.Key]--; SavePreferences(); ShowCart(); UpdateCartLabel(); }; row.Children.Add(minus);

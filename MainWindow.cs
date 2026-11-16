@@ -44,10 +44,10 @@ public sealed class MainWindow : Window
     private readonly Dictionary<(int Course, int Group), int> _cart = [];
     private readonly HashSet<int> _favorites = [];
     private readonly StackPanel _content = new() { Spacing = 12 };
-    private readonly TextBox _name = new() { PlaceholderText = "ФИО" };
-    private readonly TextBox _phone = new() { PlaceholderText = "Телефон" };
-    private readonly TextBox _email = new() { PlaceholderText = "Эл. почта" };
-    private readonly ComboBox _payment = new() { ItemsSource = new[] { "Картой в студии", "Наличными в студии" }, SelectedIndex = 0 };
+    private TextBox _name = new() { PlaceholderText = "ФИО" };
+    private TextBox _phone = new() { PlaceholderText = "Телефон" };
+    private TextBox _email = new() { PlaceholderText = "Эл. почта" };
+    private ComboBox _payment = new() { ItemsSource = new[] { "Картой в студии", "Наличными в студии" }, SelectedIndex = 0 };
     private readonly Dictionary<string, Button> _navButtons = [];
     private Button? _cartHeaderButton;
     private TextBox? _promoInput;
@@ -372,6 +372,7 @@ public sealed class MainWindow : Window
     private void UpdateCartLabel() { if (_cartHeaderButton != null) _cartHeaderButton.Content = "Корзина  ·  " + CartCount(); }
     private void ShowCart()
     {
+        _content.Children.Clear();
         Heading("Ваша корзина", "Участие в программе подтверждается после оформления заявки.");
         if (_cart.Count == 0)
         {
@@ -379,6 +380,13 @@ public sealed class MainWindow : Window
             var browse = MakeButton("Перейти в каталог", true); browse.HorizontalAlignment = HorizontalAlignment.Left; browse.Click += (_, _) => Navigate("Каталог"); empty.Children.Add(browse);
             _content.Children.Add(Surface(empty, new Thickness(20))); return;
         }
+        // Avalonia controls may have only one visual parent. Create fresh checkout fields
+        // whenever this view is rebuilt (for example after changing quantity or promo code).
+        _name = new TextBox { PlaceholderText = "ФИО", Text = _name.Text, Padding = new Thickness(12) };
+        _phone = new TextBox { PlaceholderText = "Телефон", Text = _phone.Text, Padding = new Thickness(12) };
+        _email = new TextBox { PlaceholderText = "Эл. почта", Text = _email.Text, Padding = new Thickness(12) };
+        var paymentIndex = _payment.SelectedIndex;
+        _payment = new ComboBox { ItemsSource = new[] { "Картой в студии", "Наличными в студии" }, SelectedIndex = Math.Max(0, paymentIndex) };
         var total = 0;
         foreach (var entry in _cart.ToArray())
         {
@@ -398,7 +406,7 @@ public sealed class MainWindow : Window
         var summary = new StackPanel { Spacing = 8, Children = { new TextBlock { Text = "ИТОГО К ОПЛАТЕ В СТУДИИ", FontSize = 10, Foreground = Brush("#827C6C") }, new TextBlock { Text = discount > 0 ? $"{Money(payable)}   ·   скидка {discount}% (вместо {Money(total)})" : Money(total), FontFamily = "Georgia", FontSize = 25, Foreground = Brush("#805E37") }, new TextBlock { Text = "Онлайн-оплата не требуется. Оплатить можно на первом занятии.", FontSize = 12, Foreground = Brush("#827C6C") } } };
         _content.Children.Add(Surface(summary));
         Heading("Контакт для подтверждения");
-        foreach (var field in new[] { _name, _phone, _email }) { field.Padding = new Thickness(12); _content.Children.Add(field); }
+        foreach (var field in new[] { _name, _phone, _email }) _content.Children.Add(field);
         _content.Children.Add(_payment);
         var submit = MakeButton("Подтвердить запись", true); submit.Click += async (_, _) => await Checkout(payable); _content.Children.Add(submit);
     }
@@ -421,6 +429,7 @@ public sealed class MainWindow : Window
     private void ShowAccount()
     {
         Heading("Личный кабинет", "История ваших заявок и выбранные программы.");
+        _phone = new TextBox { PlaceholderText = "Телефон", Text = _phone.Text, Padding = new Thickness(12) };
         _content.Children.Add(Surface(new StackPanel { Spacing = 9, Children = { new TextBlock { Text = "Найдите свои записи по номеру телефона", FontFamily = "Georgia", FontSize = 18, Foreground = Brush("#20352A") }, _phone, MakeButton("Показать историю", true) } }));
         var lookup = (Button)((StackPanel)((Border)_content.Children[^1]).Child!).Children[2]; lookup.Click += async (_, _) => await LoadAccount(_phone.Text?.Trim() ?? "");
         if (!string.IsNullOrWhiteSpace(_phone.Text)) _ = LoadAccount(_phone.Text.Trim());
@@ -758,6 +767,5 @@ public sealed class MainWindow : Window
         _toastTimer.Start();
     }
 }
-
 
 

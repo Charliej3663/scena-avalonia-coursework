@@ -43,15 +43,16 @@ jobs:
       - name: Publish latest release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
+          tag_name: v1.1.1
           target_commitish: ${{ github.sha }}
-          name: Сцена 1.1.0 — Windows x64
+          name: Сцена 1.1.1 — Windows x64
           body: |
-            Актуальная версия настольного приложения театральной студии «Сцена».
-            Сборка из свежего кода main. Включает защищённый вход администратора, сводку и журнал запусков, цветовые статусы и тост-уведомления.
+            Исправлено падение приложения при открытии корзины.
+            Актуальная сборка из main включает защищённую панель администратора, журнал запусков, цветовые статусы и тост-уведомления.
             Для хранения данных требуется SQL Server Express LocalDB.
           files: artifacts/ScenaAvalonia-Windows-x64.zip
           overwrite_files: true
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

@@ -1,11 +1,14 @@
 using System.Text.Json;
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using Microsoft.EntityFrameworkCore;
 using ScenaAvalonia.Data;
 using ScenaAvalonia.Models;
@@ -33,6 +36,11 @@ public sealed class MainWindow : Window
     ];
 
     private readonly string _connectionString;
+    private readonly SemaphoreSlim _databaseInitializationLock = new(1, 1);
+    private volatile bool _databaseInitialized;
+    private readonly Guid _sessionKey = Guid.NewGuid();
+    private Task _visitRegistration = Task.CompletedTask;
+    private bool _adminAuthenticated;
     private readonly Dictionary<(int Course, int Group), int> _cart = [];
     private readonly HashSet<int> _favorites = [];
     private readonly StackPanel _content = new() { Spacing = 12 };
@@ -46,6 +54,9 @@ public sealed class MainWindow : Window
     private string _promoCode = "";
     private bool _favoritesOnly;
     private readonly string _localStatePath;
+    private Grid? _rootLayout;
+    private Border? _toast;
+    private DispatcherTimer? _toastTimer;
     private string _page = "Каталог";
 
     public MainWindow()
@@ -57,6 +68,7 @@ public sealed class MainWindow : Window
         _localStatePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScenaStudio", "preferences.json");
         LoadPreferences();
         var layout = new Grid { ColumnDefinitions = new ColumnDefinitions("248,*"), RowDefinitions = new RowDefinitions("78,*") };
+        _rootLayout = layout;
         var sidebar = new StackPanel { Spacing = 9, Margin = new Thickness(18, 20) };
         sidebar.Children.Add(new TextBlock { Text = "СЦЕНА", FontSize = 27, FontFamily = "Georgia", FontWeight = FontWeight.Bold, Foreground = Brush("#D3BC8D"), Margin = new Thickness(12, 8, 12, 0) });
         sidebar.Children.Add(new TextBlock { Text = "ТЕАТРАЛЬНЫЙ САЛОН · 2018", FontSize = 10, Foreground = Brush("#B5B5A0"), Margin = new Thickness(13, 0, 12, 26) });
@@ -66,7 +78,9 @@ public sealed class MainWindow : Window
             AddNav(sidebar, item);
         }
         sidebar.Children.Add(new TextBlock { Text = "КАБИНЕТ", FontSize = 10, Foreground = Brush("#A8AE9F"), Margin = new Thickness(13, 20, 12, 3) });
-        foreach (var item in new[] { "Корзина", "Личный кабинет", "Поддержка", "Администрирование" }) AddNav(sidebar, item);
+        foreach (var item in new[] { "Корзина", "Личный кабинет", "Поддержка" }) AddNav(sidebar, item);
+        sidebar.Children.Add(new TextBlock { Text = "СЛУЖЕБНЫЙ ВХОД", FontSize = 10, Foreground = Brush("#A8AE9F"), Margin = new Thickness(13, 20, 12, 3) });
+        AddNav(sidebar, "Вход администратора");
         var studioCard = new Border { Margin = new Thickness(5, 34, 5, 0), Padding = new Thickness(15), CornerRadius = new CornerRadius(12), Background = Brush("#263A30"), Child = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "ВАШЕ ВРЕМЯ — СЦЕНА", FontSize = 10, Foreground = Brush("#D3BC8D") }, new TextBlock { Text = "Камерные группы.\nБольшие открытия.", FontFamily = "Georgia", FontSize = 16, Foreground = Brush("#F5EFE3"), TextWrapping = TextWrapping.Wrap } } } };
         sidebar.Children.Add(studioCard);
         var side = new Border { Background = Gradient("#14251D", "#263A30", 110), Child = new ScrollViewer { Content = sidebar } };
@@ -79,6 +93,7 @@ public sealed class MainWindow : Window
         var scroll = new ScrollViewer { Content = _content, Margin = new Thickness(34, 16, 38, 34), HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         Grid.SetColumn(scroll, 1); Grid.SetRow(scroll, 1); layout.Children.Add(scroll); Content = layout;
         Navigate("Главная");
+        _visitRegistration = RegisterVisit();
     }
 
     private static IBrush Brush(string hex) => new SolidColorBrush(Color.Parse(hex));
@@ -95,7 +110,7 @@ public sealed class MainWindow : Window
     }
     private void AddNav(StackPanel sidebar, string label)
     {
-        var caption = label switch { "Главная" => "⌂   Главная", "Каталог" => "◇   Каталог", "Расписание" => "▦   Расписание", "Избранное" => "♡   Избранное", "Отзывы" => "✦   Отзывы", "Корзина" => "▱   Корзина", "Личный кабинет" => "◉   Личный кабинет", "Поддержка" => "✉   Поддержка", _ => "⚙   Администрирование" };
+        var caption = label switch { "Главная" => "⌂   Главная", "Каталог" => "◇   Каталог", "Расписание" => "▦   Расписание", "Избранное" => "♡   Избранное", "Отзывы" => "✦   Отзывы", "Корзина" => "▱   Корзина", "Личный кабинет" => "◉   Личный кабинет", "Поддержка" => "✉   Поддержка", _ => "♙   Вход администратора" };
         var button = new Button { Content = caption, HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(14, 12), Background = Brushes.Transparent, Foreground = Brush("#E9E6D9"), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(7), FontSize = 13 };
         button.Click += (_, _) => Navigate(label); _navButtons[label] = button; sidebar.Children.Add(button);
     }
@@ -110,25 +125,73 @@ public sealed class MainWindow : Window
         try { var dir = Path.GetDirectoryName(_localStatePath)!; Directory.CreateDirectory(dir); File.WriteAllText(_localStatePath, JsonSerializer.Serialize(new { favorites = _favorites, cart = _cart.Select(x => new { course = x.Key.Course, group = x.Key.Group, quantity = x.Value }), name = _name.Text, phone = _phone.Text, email = _email.Text })); }
         catch { }
     }
+    private async Task RegisterVisit()
+    {
+        try
+        {
+            await EnsureDatabase();
+            await using var db = Db();
+            db.AppVisits.Add(new AppVisit { SessionKey = _sessionKey, VisitorName = string.IsNullOrWhiteSpace(_name.Text) ? "Гость" : _name.Text.Trim(), StartedAt = DateTime.Now });
+            await db.SaveChangesAsync();
+        }
+        catch { }
+    }
+    private async Task UpdateCurrentVisitName(string visitorName)
+    {
+        try
+        {
+            await _visitRegistration;
+            await using var db = Db();
+            var visit = await db.AppVisits.FirstOrDefaultAsync(x => x.SessionKey == _sessionKey);
+            if (visit is null) return;
+            visit.VisitorName = visitorName;
+            await db.SaveChangesAsync();
+        }
+        catch { }
+    }
     private static string LoadConnectionString()
     {
         try
         {
             var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-            return JsonDocument.Parse(File.ReadAllText(path)).RootElement.GetProperty("ConnectionStrings").GetProperty("Studio").GetString()!;
+            var configured = JsonDocument.Parse(File.ReadAllText(path)).RootElement.GetProperty("ConnectionStrings").GetProperty("Studio").GetString();
+            if (!string.IsNullOrWhiteSpace(configured)) return configured;
         }
-        catch { return @"Server=(localdb)\MSSQLLocalDB;Database=ScenaStudio;Trusted_Connection=True;TrustServerCertificate=True;"; }
+        catch { }
+        return @"Server=(localdb)\MSSQLLocalDB;Database=ScenaStudioCoursework;Trusted_Connection=True;TrustServerCertificate=True;Connect Timeout=5;";
     }
     private StudioDbContext Db() => new(new DbContextOptionsBuilder<StudioDbContext>().UseSqlServer(_connectionString).Options);
     private async Task EnsureDatabase()
     {
-        await using var db = Db(); await db.Database.EnsureCreatedAsync();
-        await db.Database.ExecuteSqlRawAsync("IF OBJECT_ID(N'dbo.Reviews', N'U') IS NULL CREATE TABLE dbo.Reviews (Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_Reviews PRIMARY KEY, Name nvarchar(100) NOT NULL, Text nvarchar(2000) NOT NULL, Rating int NOT NULL, CreatedAt datetime2 NOT NULL)");
+        if (_databaseInitialized) return;
+        await _databaseInitializationLock.WaitAsync();
+        try
+        {
+            if (_databaseInitialized) return;
+            await using var db = Db();
+            await db.Database.EnsureCreatedAsync();
+            var schema = new[]
+            {
+                "IF OBJECT_ID(N'dbo.Customers', N'U') IS NULL CREATE TABLE dbo.Customers (Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_Customers PRIMARY KEY, Name nvarchar(100) NOT NULL, Phone nvarchar(20) NOT NULL, Email nvarchar(100) NOT NULL)",
+                "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Customers') AND name = N'IX_Customers_Phone') CREATE INDEX IX_Customers_Phone ON dbo.Customers(Phone)",
+                "IF OBJECT_ID(N'dbo.Enrollments', N'U') IS NULL CREATE TABLE dbo.Enrollments (Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_Enrollments PRIMARY KEY, CustomerId int NOT NULL, CourseId int NOT NULL, GroupNumber int NOT NULL, Quantity int NOT NULL, Total int NOT NULL, PaymentMethod nvarchar(max) NOT NULL, Status nvarchar(30) NOT NULL, CreatedAt datetime2 NOT NULL, CONSTRAINT FK_Enrollments_Customers_CustomerId FOREIGN KEY (CustomerId) REFERENCES dbo.Customers(Id) ON DELETE CASCADE)",
+                "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.Enrollments') AND name = N'IX_Enrollments_CustomerId') CREATE INDEX IX_Enrollments_CustomerId ON dbo.Enrollments(CustomerId)",
+                "IF OBJECT_ID(N'dbo.SupportMessages', N'U') IS NULL CREATE TABLE dbo.SupportMessages (Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_SupportMessages PRIMARY KEY, CustomerName nvarchar(max) NOT NULL, Text nvarchar(2000) NOT NULL, Reply nvarchar(2000) NOT NULL, CreatedAt datetime2 NOT NULL)",
+                "IF OBJECT_ID(N'dbo.Reviews', N'U') IS NULL CREATE TABLE dbo.Reviews (Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_Reviews PRIMARY KEY, Name nvarchar(100) NOT NULL, Text nvarchar(2000) NOT NULL, Rating int NOT NULL, CreatedAt datetime2 NOT NULL)",
+                "IF OBJECT_ID(N'dbo.AppVisits', N'U') IS NULL CREATE TABLE dbo.AppVisits (Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_AppVisits PRIMARY KEY, SessionKey uniqueidentifier NOT NULL, VisitorName nvarchar(120) NOT NULL, StartedAt datetime2 NOT NULL)",
+                "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.AppVisits') AND name = N'IX_AppVisits_StartedAt') CREATE INDEX IX_AppVisits_StartedAt ON dbo.AppVisits(StartedAt)"
+            };
+            foreach (var statement in schema) await db.Database.ExecuteSqlRawAsync(statement);
+            _databaseInitialized = true;
+        }
+        finally { _databaseInitializationLock.Release(); }
     }
     private void Navigate(string page)
     {
+        if (page == "Администрирование" && !_adminAuthenticated) page = "Вход администратора";
+        if (_page == "Администрирование" && page != "Администрирование") _adminAuthenticated = false;
         _page = page; _content.Children.Clear();
-        foreach (var (name, button) in _navButtons) { button.Background = name == page ? Brush("#A88650") : Brushes.Transparent; button.Foreground = Brush("#F4F0E5"); }
+        foreach (var (name, button) in _navButtons) { var active = name == page || (page == "Администрирование" && name == "Вход администратора"); button.Background = active ? Brush("#A88650") : Brushes.Transparent; button.Foreground = active ? Brush("#FFFDF7") : Brush("#F4F0E5"); }
         switch (page)
         {
             case "Главная": ShowHome(); break;
@@ -139,7 +202,8 @@ public sealed class MainWindow : Window
             case "Корзина": ShowCart(); break;
             case "Личный кабинет": ShowAccount(); break;
             case "Поддержка": ShowSupport(); break;
-            default: ShowAdmin(); break;
+            case "Вход администратора": ShowAdminLogin(); break;
+            case "Администрирование": ShowAdmin(); break;
         }
     }
     private void Heading(string title, string? subtitle = null)
@@ -163,10 +227,72 @@ public sealed class MainWindow : Window
         var statTexts = new[] { ("12", "авторских курсов"), ("8", "занятий в программе"), ("до 10", "человек в группе"), ("с 2018", "создаём сцену") };
         for (var i = 0; i < statTexts.Length; i++) { var (value, label) = statTexts[i]; var stat = Surface(new StackPanel { Spacing = 4, Children = { new TextBlock { Text = value, FontFamily = "Georgia", FontSize = 24, Foreground = Brush("#8B6B3F") }, new TextBlock { Text = label, FontSize = 12, Foreground = Brush("#827C6C") } } }, new Thickness(16, 13)); Grid.SetColumn(stat, i); stats.Children.Add(stat); }
         _content.Children.Add(stats);
+        AddRouteCard();
         SectionLabel("ВЫБОР ХУДОЖЕСТВЕННОГО РУКОВОДИТЕЛЯ", "Курсы, с которых начинается большое увлечение");
         var chosen = new WrapPanel { Orientation = Orientation.Horizontal, ItemWidth = 335, ItemHeight = 475, HorizontalAlignment = HorizontalAlignment.Left };
         foreach (var c in Courses.Take(3)) chosen.Children.Add(CourseCard(c)); _content.Children.Add(chosen);
         var quote = new Border { Background = Gradient("#E9DDC8", "#F4EFE5"), CornerRadius = new CornerRadius(12), Padding = new Thickness(25), Child = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "«Театр начинается там, где человек впервые позволяет себе быть услышанным»", FontFamily = "Georgia", FontSize = 19, FontStyle = FontStyle.Italic, Foreground = Brush("#334638"), TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = "— ИЗ МАНИФЕСТА СТУДИИ", FontSize = 10, Foreground = Brush("#8B6B3F") } } } }; _content.Children.Add(quote);
+    }
+    private void AddRouteCard()
+    {
+        const string address = "Петроградская набережная, 34А, Санкт-Петербург";
+        var info = new StackPanel { Spacing = 12, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 8, 22, 8) };
+        info.Children.Add(new TextBlock { Text = "ГОСТЯМ СТУДИИ", FontSize = 10, Foreground = Brush("#A88650") });
+        info.Children.Add(new TextBlock { Text = "Как добраться", FontFamily = "Georgia", FontSize = 27, Foreground = Brush("#20352A") });
+        info.Children.Add(new TextBlock { Text = address, FontSize = 14, Foreground = Brush("#655F52"), TextWrapping = TextWrapping.Wrap });
+        info.Children.Add(new TextBlock { Text = "Построй маршрут от вашего местоположения. Google Maps уточнит путь и пересадки.", FontSize = 12, Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap });
+        var destination = Uri.EscapeDataString(address);
+        var url = $"https://www.google.com/maps/dir/?api=1&origin=My+Location&destination={destination}&travelmode=transit";
+        var routeButton = MakeButton("Открыть маршрут в Google Maps  ↗", true);
+        routeButton.HorizontalAlignment = HorizontalAlignment.Left;
+        routeButton.Click += async (_, _) => await OpenMap(url);
+        info.Children.Add(routeButton);
+
+        var map = new Canvas { MinHeight = 225, Background = Gradient("#E8E0D2", "#D9D6C8") };
+        var route = new Avalonia.Controls.Shapes.Path
+        {
+            Data = Avalonia.Media.Geometry.Parse("M 38,177 C 92,177 88,111 153,111 S 214,168 270,140 S 326,70 390,70"),
+            Stroke = Brush("#A88650"), StrokeThickness = 5, StrokeLineCap = PenLineCap.Round
+        };
+        map.Children.Add(route);
+        AddRouteMarker(map, 22, 161, "🚶", "ВЫ ЗДЕСЬ", false);
+        AddRouteMarker(map, 137, 95, "●", "ПО ПУТИ", false);
+        AddRouteMarker(map, 254, 124, "●", "ПЕТРОГРАДСКАЯ", false);
+        AddRouteMarker(map, 374, 53, "✦", "СЦЕНА", true);
+        var routePanel = new Border { Background = Gradient("#F4EFE5", "#E8E0D2"), CornerRadius = new CornerRadius(12), Padding = new Thickness(10), Child = map };
+        var layout = new Grid { ColumnDefinitions = new ColumnDefinitions("0.9*,1.1*"), ColumnSpacing = 18, MinHeight = 270 };
+        layout.Children.Add(info); Grid.SetColumn(routePanel, 1); layout.Children.Add(routePanel);
+        _content.Children.Add(Surface(layout, new Thickness(20)));
+    }
+    private static void AddRouteMarker(Canvas map, double x, double y, string icon, string label, bool destination)
+    {
+        var color = destination ? "#20352A" : "#8B6B3F";
+        var marker = new StackPanel { Spacing = 2, HorizontalAlignment = HorizontalAlignment.Center, Children =
+        {
+            new Border { Width = 30, Height = 30, CornerRadius = new CornerRadius(15), Background = Brush(color), Child = new TextBlock { Text = icon, FontSize = 15, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } },
+            new TextBlock { Text = label, FontSize = 8, FontWeight = FontWeight.Bold, Foreground = Brush("#394238"), HorizontalAlignment = HorizontalAlignment.Center }
+        } };
+        Canvas.SetLeft(marker, x); Canvas.SetTop(marker, y); map.Children.Add(marker);
+    }
+    private async Task OpenMap(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch
+        {
+            var copied = false;
+            try
+            {
+                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+                if (clipboard is not null) { await clipboard.SetTextAsync(url); copied = true; }
+            }
+            catch { }
+            Message(copied ? "Ссылка скопирована" : "Не удалось открыть карту", copied
+                ? "Windows не разрешила приложению запустить браузер. Ссылка на маршрут скопирована — вставьте её в браузер."
+                : "Windows не разрешила приложению запустить браузер. Откройте Google Maps вручную и вставьте ссылку: " + url);
+        }
     }
     private void SectionLabel(string label, string title)
     {
@@ -288,7 +414,7 @@ public sealed class MainWindow : Window
             await db.SaveChangesAsync();
             var discount = _promoCode == "SCENA10" ? 10 : _promoCode == "DEBUT" ? 5 : 0;
             foreach (var (key, quantity) in _cart) { var sum = Courses[key.Course].Price * quantity; db.Enrollments.Add(new Enrollment { CustomerId = customer.Id, CourseId = key.Course, GroupNumber = key.Group, Quantity = quantity, Total = sum - sum * discount / 100, PaymentMethod = _payment.SelectedItem?.ToString() ?? "Картой в студии" }); }
-            await db.SaveChangesAsync(); _cart.Clear(); _promoCode = ""; SavePreferences(); UpdateCartLabel(); Message("Заявка принята", $"Заявка на {Money(total)} сохранена в Microsoft SQL Server. Приходите за 10–15 минут до начала."); Navigate("Личный кабинет");
+            await db.SaveChangesAsync(); await UpdateCurrentVisitName(_name.Text!.Trim()); _cart.Clear(); _promoCode = ""; SavePreferences(); UpdateCartLabel(); Message("Заявка принята", $"Заявка на {Money(total)} сохранена в Microsoft SQL Server. Приходите за 10–15 минут до начала."); Navigate("Личный кабинет");
         }
         catch (Exception ex) { Message("Не удалось сохранить заявку", DbError(ex)); }
     }
@@ -311,10 +437,32 @@ public sealed class MainWindow : Window
             foreach (var o in list)
             {
                 var c = Courses.ElementAtOrDefault(o.CourseId); if (c == null) continue;
-                _content.Children.Add(Card($"Заявка №{o.Id} · {o.Status} · {Money(o.Total)}\n{o.Customer?.Name} · {o.Customer?.Phone}\n{c.Title} · группа {o.GroupNumber + 1} · {o.CreatedAt:g}\nОплата: {o.PaymentMethod}", async () =>
+                var accountCard = new StackPanel { Spacing = 8 };
+                var orderHeading = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+                orderHeading.Children.Add(new TextBlock { Text = $"Заявка №{o.Id} · {Money(o.Total)}", FontWeight = FontWeight.SemiBold, Foreground = Brush("#20352A"), VerticalAlignment = VerticalAlignment.Center });
+                var statusBadge = StatusBadge(o.Status); Grid.SetColumn(statusBadge, 1); orderHeading.Children.Add(statusBadge); accountCard.Children.Add(orderHeading);
+                accountCard.Children.Add(new TextBlock { Text = $"{o.Customer?.Name} · {o.Customer?.Phone}\n{c.Title} · группа {o.GroupNumber + 1} · {o.CreatedAt:g}\nОплата: {o.PaymentMethod}", TextWrapping = TextWrapping.Wrap, Foreground = Brush("#655F52") });
+                if (o.Status is "Новый" or "Оплачен")
                 {
-                    if (o.Status is "Новый" or "Оплачен") { o.Status = "Отменён"; await db.SaveChangesAsync(); Navigate("Личный кабинет"); }
-                }));
+                    var cancel = MakeButton("Отменить заявку", false);
+                    cancel.HorizontalAlignment = HorizontalAlignment.Left;
+                    cancel.Click += async (_, _) =>
+                    {
+                        try
+                        {
+                            await using var updateDb = Db();
+                            var enrollment = await updateDb.Enrollments.FindAsync(o.Id);
+                            if (enrollment is null) return;
+                            enrollment.Status = "Отменён";
+                            await updateDb.SaveChangesAsync();
+                            Message("Заявка отменена", $"Заявка №{o.Id} отменена.");
+                            Navigate("Личный кабинет");
+                        }
+                        catch (Exception ex) { Message("Не удалось отменить", DbError(ex)); }
+                    };
+                    accountCard.Children.Add(cancel);
+                }
+                _content.Children.Add(Surface(accountCard, new Thickness(15)));
             }
         }
         catch (Exception ex) { _content.Children.Add(new TextBlock { Text = DbError(ex), TextWrapping = TextWrapping.Wrap }); }
@@ -373,25 +521,137 @@ public sealed class MainWindow : Window
         }
         catch { }
     }
+    private void ShowAdminLogin()
+    {
+        Heading("Вход для сотрудников", "Служебная панель отделена от гостевого каталога и доступна после проверки учётных данных.");
+        var firstSetup = !AdminCredentials.IsConfigured;
+        var userName = new TextBox { PlaceholderText = "Имя пользователя", Text = AdminCredentials.DefaultUserName, IsReadOnly = true, Padding = new Thickness(12) };
+        var password = new TextBox { PlaceholderText = firstSetup ? "Создайте пароль (не менее 10 символов)" : "Пароль", PasswordChar = '●', Padding = new Thickness(12) };
+        var repeat = new TextBox { PlaceholderText = "Повторите пароль", PasswordChar = '●', Padding = new Thickness(12), IsVisible = firstSetup };
+        var error = new TextBlock { Foreground = Brush("#9E3D38"), TextWrapping = TextWrapping.Wrap };
+        var login = MakeButton(firstSetup ? "Создать доступ и войти" : "Войти в панель", true);
+        login.HorizontalAlignment = HorizontalAlignment.Left;
+        login.Click += (_, _) =>
+        {
+            if (firstSetup)
+            {
+                if (password.Text != repeat.Text) { error.Text = "Пароли не совпадают."; return; }
+                if (string.IsNullOrWhiteSpace(password.Text) || password.Text.Length < 10) { error.Text = "Создайте пароль длиной не менее 10 символов."; return; }
+                try
+                {
+                    if (!AdminCredentials.CreateInitialPassword(password.Text)) { error.Text = "Не удалось создать доступ. Закройте и снова откройте форму."; return; }
+                }
+                catch (Exception ex) { error.Text = "Не удалось сохранить доступ в профиле Windows: " + ex.Message; return; }
+            }
+            else if (!AdminCredentials.Verify(userName.Text ?? "", password.Text ?? "")) { error.Text = "Не удалось войти. Проверьте имя пользователя и пароль."; return; }
+            _adminAuthenticated = true;
+            Navigate("Администрирование");
+        };
+        var form = new StackPanel { Spacing = 12, Children =
+        {
+            new TextBlock { Text = firstSetup ? "Первичная настройка доступа" : "Служебный доступ", FontFamily = "Georgia", FontSize = 22, Foreground = Brush("#20352A") },
+            userName, password, repeat, error, login,
+            new TextBlock { Text = firstSetup ? "Задайте свой пароль администратора. Он сохранится в профиле Windows только как криптографический хеш." : "Гостевой режим не требует входа. Доступ администратора хранится отдельно в профиле Windows.", FontSize = 12, Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap }
+        } };
+        _content.Children.Add(Surface(form, new Thickness(20)));
+    }
     private void ShowAdmin()
     {
-        Heading("Администрирование", "Для демонстрации курсовой: просмотр заявок и смена статуса."); _ = LoadAdmin();
+        Heading("Панель управления", "Сводка по посещениям, заявкам и обращениям студии.");
+        var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var refresh = MakeButton("Обновить данные", false); refresh.Click += (_, _) => Navigate("Администрирование");
+        var changePassword = MakeButton("Сменить пароль", false); changePassword.Click += async (_, _) => await ShowChangePassword();
+        var signOut = MakeButton("Выйти", true); signOut.Click += (_, _) => { _adminAuthenticated = false; Navigate("Главная"); };
+        toolbar.Children.Add(refresh); toolbar.Children.Add(changePassword); toolbar.Children.Add(signOut); _content.Children.Add(toolbar);
+        _ = LoadAdmin();
+    }
+    private async Task ShowChangePassword()
+    {
+        var current = new TextBox { PlaceholderText = "Текущий пароль", PasswordChar = '●', Padding = new Thickness(12) };
+        var next = new TextBox { PlaceholderText = "Новый пароль (не менее 10 символов)", PasswordChar = '●', Padding = new Thickness(12) };
+        var repeat = new TextBox { PlaceholderText = "Повторите новый пароль", PasswordChar = '●', Padding = new Thickness(12) };
+        var error = new TextBlock { Foreground = Brush("#9E3D38"), TextWrapping = TextWrapping.Wrap };
+        var dialog = new Window { Title = "Смена пароля", Width = 460, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner, CanResize = false, Background = Brush("#F3EEE5") };
+        var save = MakeButton("Сохранить новый пароль", true); save.HorizontalAlignment = HorizontalAlignment.Right;
+        var cancel = MakeButton("Отмена", false); cancel.Click += (_, _) => dialog.Close();
+        save.Click += (_, _) =>
+        {
+            if (next.Text != repeat.Text) { error.Text = "Новые пароли не совпадают."; return; }
+            if (string.IsNullOrWhiteSpace(next.Text) || next.Text.Length < 10) { error.Text = "Пароль должен содержать не менее 10 символов."; return; }
+            try
+            {
+                if (!AdminCredentials.ChangePassword(current.Text ?? "", next.Text)) { error.Text = "Текущий пароль указан неверно."; return; }
+                dialog.Close(); Message("Пароль изменён", "Используйте новый пароль при следующем входе администратора.");
+            }
+            catch (Exception ex) { error.Text = "Не удалось сохранить пароль: " + ex.Message; }
+        };
+        var form = new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "Безопасность учётной записи", FontFamily = "Georgia", FontSize = 20, Foreground = Brush("#20352A") }, current, next, repeat, error, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { cancel, save } } } };
+        dialog.Content = Surface(form, new Thickness(18)); dialog.Padding = new Thickness(14);
+        await dialog.ShowDialog(this);
     }
     private async Task LoadAdmin()
     {
+        if (!_adminAuthenticated) return;
         try
         {
+            await _visitRegistration;
             await EnsureDatabase(); await using var db = Db();
             var orders = await db.Enrollments.Include(x => x.Customer).OrderByDescending(x => x.CreatedAt).ToListAsync();
             if (_page != "Администрирование") return;
+            var today = DateTime.Today;
+            var totalVisits = await db.AppVisits.CountAsync();
+            var todayVisits = await db.AppVisits.CountAsync(x => x.StartedAt >= today);
+            var newOrders = orders.Count(x => x.Status == "Новый");
+            var recentVisits = await db.AppVisits.OrderByDescending(x => x.StartedAt).Take(20).ToListAsync();
+            SectionLabel("АНАЛИТИКА СТУДИИ", "Обзор активности");
+            var metrics = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*,*,*"), ColumnSpacing = 10 };
+            metrics.Children.Add(AdminMetric("Визиты", totalVisits.ToString(), "всего сеансов"));
+            var todayMetric = AdminMetric("Сегодня", todayVisits.ToString(), "запусков приложения"); Grid.SetColumn(todayMetric, 1); metrics.Children.Add(todayMetric);
+            var orderMetric = AdminMetric("Заявки", orders.Count.ToString(), "всего оформлено"); Grid.SetColumn(orderMetric, 2); metrics.Children.Add(orderMetric);
+            var pendingMetric = AdminMetric("Новые", newOrders.ToString(), "ждут обработки"); Grid.SetColumn(pendingMetric, 3); metrics.Children.Add(pendingMetric);
+            _content.Children.Add(metrics);
+            _content.Children.Add(new TextBlock { Text = "Журнал хранит только время запуска и имя, если посетитель указал его при записи. Неидентифицированные визиты отображаются как «Гость». Данные локальны для этой установки приложения.", FontSize = 12, Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap });
+            SectionLabel("РАБОТА С ПОСЕТИТЕЛЯМИ", "Заявки");
+            if (orders.Count == 0) _content.Children.Add(Surface(new TextBlock { Text = "Заявок пока нет. Когда посетитель оформит запись через корзину, она появится здесь.", Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap }, new Thickness(14)));
             foreach (var o in orders)
             {
                 var c = Courses.ElementAtOrDefault(o.CourseId); if (c == null) continue;
-                var row = new StackPanel { Spacing = 5 };
-                row.Children.Add(new TextBlock { Text = $"№{o.Id} · {o.Customer?.Name} · {o.Customer?.Phone} · {c.Title} · группа {o.GroupNumber + 1} · {Money(o.Total)} · {o.Status}", TextWrapping = TextWrapping.Wrap });
+                var row = new StackPanel { Spacing = 8 };
+                var orderLine = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+                orderLine.Children.Add(new TextBlock { Text = $"№{o.Id} · {o.Customer?.Name} · {o.Customer?.Phone} · {c.Title} · группа {o.GroupNumber + 1} · {Money(o.Total)}", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center });
+                var orderStatus = StatusBadge(o.Status); Grid.SetColumn(orderStatus, 1); orderLine.Children.Add(orderStatus); row.Children.Add(orderLine);
                 var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-                foreach (var status in new[] { "Оплачен", "Завершён", "Отменён" }) { var b = new Button { Content = status }; b.Click += async (_, _) => { o.Status = status; await db.SaveChangesAsync(); Navigate("Администрирование"); }; actions.Children.Add(b); }
+                foreach (var status in new[] { "Оплачен", "Завершён", "Отменён" })
+                {
+                    var enrollmentId = o.Id;
+                    var b = new Button { Content = status };
+                    b.Click += async (_, _) =>
+                    {
+                        try
+                        {
+                            await using var updateDb = Db();
+                            var enrollment = await updateDb.Enrollments.FindAsync(enrollmentId);
+                            if (enrollment is null) return;
+                            enrollment.Status = status;
+                            await updateDb.SaveChangesAsync();
+                            Message("Статус обновлён", $"Заявка №{enrollmentId}: {StatusLabel(status)}.");
+                            Navigate("Администрирование");
+                        }
+                        catch (Exception ex) { Message("Не удалось изменить статус", DbError(ex)); }
+                    };
+                    actions.Children.Add(b);
+                }
                 row.Children.Add(actions); _content.Children.Add(new Border { Background = Brushes.White, Padding = new Thickness(12), Child = row });
+            }
+            SectionLabel("ЖУРНАЛ", "Последние посещения");
+            if (recentVisits.Count == 0) _content.Children.Add(Surface(new TextBlock { Text = "Записи о визитах пока не появились.", Foreground = Brush("#827C6C") }));
+            foreach (var visit in recentVisits)
+            {
+                var visitRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+                visitRow.Children.Add(new StackPanel { Spacing = 2, Children = { new TextBlock { Text = visit.VisitorName, FontWeight = FontWeight.SemiBold, Foreground = Brush("#20352A") }, new TextBlock { Text = "Посещение приложения", FontSize = 11, Foreground = Brush("#827C6C") } } });
+                var visitTime = new TextBlock { Text = visit.StartedAt.ToString("dd.MM.yyyy  HH:mm", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")), Foreground = Brush("#8B6B3F"), VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetColumn(visitTime, 1); visitRow.Children.Add(visitTime);
+                _content.Children.Add(Surface(visitRow, new Thickness(12)));
             }
             var title = new TextBlock { Text = "Обращения", FontSize = 22, FontWeight = FontWeight.Bold, Margin = new Thickness(0, 14, 0, 0) }; _content.Children.Add(title);
             var messages = await db.SupportMessages.OrderByDescending(x => x.CreatedAt).ToListAsync();
@@ -399,12 +659,60 @@ public sealed class MainWindow : Window
             foreach (var m in messages)
             {
                 var reply = new TextBox { PlaceholderText = "Ответ", Text = m.Reply };
-                var save = new Button { Content = "Сохранить ответ" }; save.Click += async (_, _) => { m.Reply = reply.Text?.Trim() ?? ""; await db.SaveChangesAsync(); Message("Сохранено", "Ответ добавлен."); };
+                var messageId = m.Id;
+                var save = new Button { Content = "Сохранить ответ" };
+                save.Click += async (_, _) =>
+                {
+                    try
+                    {
+                        await using var updateDb = Db();
+                        var message = await updateDb.SupportMessages.FindAsync(messageId);
+                        if (message is null) return;
+                        message.Reply = reply.Text?.Trim() ?? "";
+                        await updateDb.SaveChangesAsync();
+                        Message("Сохранено", "Ответ добавлен.");
+                    }
+                    catch (Exception ex) { Message("Не удалось сохранить ответ", DbError(ex)); }
+                };
                 _content.Children.Add(new TextBlock { Text = $"{m.CustomerName}: {m.Text}", TextWrapping = TextWrapping.Wrap }); _content.Children.Add(reply); _content.Children.Add(save);
             }
         }
-        catch (Exception ex) { _content.Children.Add(new TextBlock { Text = DbError(ex), TextWrapping = TextWrapping.Wrap }); }
+        catch (Exception ex)
+        {
+            if (_page != "Администрирование") return;
+            var errorPanel = new StackPanel { Spacing = 12 };
+            errorPanel.Children.Add(new TextBlock { Text = "Не удалось загрузить данные из SQL Server LocalDB.", FontWeight = FontWeight.SemiBold, Foreground = Brush("#20352A"), TextWrapping = TextWrapping.Wrap });
+            errorPanel.Children.Add(new TextBlock { Text = DbError(ex), TextWrapping = TextWrapping.Wrap });
+            errorPanel.Children.Add(new TextBlock { Text = "Проверьте компонент SQL Server Express LocalDB. Если он установлен, нажмите «Повторить подключение». Подробная настройка есть в LOCALDB_SETUP.md.", Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap });
+            var retry = MakeButton("Повторить подключение", true);
+            retry.HorizontalAlignment = HorizontalAlignment.Left;
+            retry.Click += (_, _) => { if (_page == "Администрирование") { _content.Children.Clear(); Heading("Администрирование", "Для демонстрации курсовой: просмотр заявок и смена статуса."); _ = LoadAdmin(); } };
+            errorPanel.Children.Add(retry);
+            _content.Children.Add(Surface(errorPanel, new Thickness(16)));
+        }
     }
+    private Control AdminMetric(string label, string value, string caption)
+    {
+        var content = new StackPanel { Spacing = 3, Children =
+        {
+            new TextBlock { Text = label.ToUpperInvariant(), FontSize = 10, Foreground = Brush("#827C6C") },
+            new TextBlock { Text = value, FontFamily = "Georgia", FontSize = 26, Foreground = Brush("#8B6B3F") },
+            new TextBlock { Text = caption, FontSize = 11, Foreground = Brush("#827C6C"), TextWrapping = TextWrapping.Wrap }
+        } };
+        return Surface(content, new Thickness(13));
+    }
+    private Control StatusBadge(string status)
+    {
+        var (label, foreground, background) = status switch
+        {
+            "Оплачен" => ("Оплачено", "#286342", "#E5F2E8"),
+            "Завершён" => ("Завершено", "#355F7C", "#E8F0F6"),
+            "Отменён" => ("Отменено", "#8B4545", "#F6E8E5"),
+            _ => ("Ожидает оплаты", "#8B641F", "#F7EFD9")
+        };
+        return new Border { Background = Brush(background), CornerRadius = new CornerRadius(20), Padding = new Thickness(10, 5), VerticalAlignment = VerticalAlignment.Center, Child = new TextBlock { Text = label, Foreground = Brush(foreground), FontSize = 11, FontWeight = FontWeight.SemiBold } };
+    }
+    private static string StatusLabel(string status) => status switch { "Оплачен" => "оплачено", "Завершён" => "завершено", "Отменён" => "отменено", _ => "ожидает оплаты" };
     private Control Card(string text, Action? action = null)
     {
         var panel = new StackPanel { Spacing = 9 }; panel.Children.Add(new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap });
@@ -417,15 +725,39 @@ public sealed class MainWindow : Window
         catch { return new Border { Width = 150, Height = 120, Background = Brush("#DDD4C7"), Child = new TextBlock { Text = "Сцена", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center } }; }
     }
     private static string Money(int value) => value.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")) + " ₽";
-    private static string DbError(Exception ex) => "Не удалось подключиться к Microsoft SQL Server. Проверьте, что SQL Server LocalDB установлен и запущен, а строка подключения верна.\n\n" + ex.GetBaseException().Message;
+    private static string DbError(Exception ex) => "Проверьте строку ConnectionStrings:Studio в appsettings.json и установку SQL Server Express LocalDB.\n\nОшибка: " + ex.GetBaseException().Message;
     private async void Message(string title, string body)
     {
+        if (title is "Добавлено в корзину" or "Промокод применён" or "Заявка принята" or "Заявка отменена" or "Отправлено" or "Сохранено" or "Пароль изменён" or "Ссылка скопирована" or "Статус обновлён")
+        {
+            ShowToast(title, body, true);
+            return;
+        }
         var dialog = new Window { Title = title, Width = 470, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner, CanResize = false, Background = Brush("#F3EEE5") };
         var ok = MakeButton("Понятно", true); ok.HorizontalAlignment = HorizontalAlignment.Right;
         ok.Click += (_, _) => dialog.Close();
         dialog.Content = Surface(new StackPanel { Spacing = 14, Children = { new TextBlock { Text = title, FontFamily = "Georgia", FontSize = 20, Foreground = Brush("#20352A") }, new TextBlock { Text = body, TextWrapping = TextWrapping.Wrap }, ok } }, new Thickness(20)); dialog.Padding = new Thickness(16);
         await dialog.ShowDialog(this);
     }
+    private void ShowToast(string title, string body, bool success)
+    {
+        if (_rootLayout is null) return;
+        _toastTimer?.Stop();
+        if (_toast is not null) _rootLayout.Children.Remove(_toast);
+        var accent = success ? "#34724A" : "#A34842";
+        var icon = success ? "✓" : "!";
+        var toastContent = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 12 };
+        toastContent.Children.Add(new Border { Width = 30, Height = 30, CornerRadius = new CornerRadius(15), Background = Brush(success ? "#E5F2E8" : "#F6E8E5"), Child = new TextBlock { Text = icon, Foreground = Brush(accent), FontWeight = FontWeight.Bold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } });
+        var copy = new StackPanel { Spacing = 3, Children = { new TextBlock { Text = title, FontWeight = FontWeight.SemiBold, Foreground = Brush("#20352A") }, new TextBlock { Text = body, FontSize = 12, Foreground = Brush("#655F52"), TextWrapping = TextWrapping.Wrap } } };
+        Grid.SetColumn(copy, 1); toastContent.Children.Add(copy);
+        _toast = new Border { Width = 390, Padding = new Thickness(14), Background = Brush("#FFFCF6"), BorderBrush = Brush(success ? "#C8DDCC" : "#E7C9C4"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 88, 38, 0), Child = toastContent };
+        Grid.SetColumnSpan(_toast, 2); Grid.SetRowSpan(_toast, 2); _rootLayout.Children.Add(_toast);
+        var currentToast = _toast;
+        _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3.8) };
+        _toastTimer.Tick += (_, _) => { _toastTimer?.Stop(); if (_rootLayout is not null) _rootLayout.Children.Remove(currentToast); if (ReferenceEquals(_toast, currentToast)) _toast = null; };
+        _toastTimer.Start();
+    }
 }
+
 
 

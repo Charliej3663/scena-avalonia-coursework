@@ -4,23 +4,26 @@
 
 ## Запуск в Visual Studio
 
-1. Установите Visual Studio 2022 с workload **Разработка классических приложений .NET** и .NET 10 SDK.
-2. Установите SQL Server Express LocalDB (он входит в некоторые установки Visual Studio) или измените строку подключения в `appsettings.json`. Для восстановления Avalonia и EF Core нужен доступ к NuGet.
-3. Откройте `ScenaAvalonia.csproj` в Visual Studio и запустите проект. При первом обращении к БД таблицы создаются автоматически через Entity Framework Core.
+1. Установите Visual Studio с поддержкой .NET 10 SDK и workload **Разработка классических приложений .NET**.
+2. В Visual Studio Installer откройте **Изменить → Отдельные компоненты** и установите **SQL Server Express LocalDB**. Для восстановления Avalonia и EF Core нужен доступ к NuGet.
+3. В PowerShell из папки проекта выполните `powershell -ExecutionPolicy Bypass -File .\setup-localdb.ps1`. Скрипт проверит наличие LocalDB, создаст экземпляр `MSSQLLocalDB`, если он отсутствует, и запустит его.
+4. Откройте `ScenaAvalonia.csproj` в Visual Studio и запустите проект. При первом обращении к разделу с данными EF Core создаст базу `ScenaStudioCoursework` и таблицы.
 
 Из командной строки из папки проекта: `dotnet run`.
 
-Готовый Windows x64 вариант — отдельный архив `ScenaAvalonia-Windows-x64.zip`. Он требует установленный **.NET 10 Desktop Runtime** и SQL Server LocalDB (либо совместимый SQL Server). Для разработки в Visual Studio все компоненты можно запустить непосредственно из исходников.
+Готовая Windows x64 версия — отдельный самодостаточный архив `ScenaAvalonia-Windows-x64-LocalDB.zip`; устанавливать .NET Runtime отдельно не нужно. Перед запуском приложения установите **SQL Server Express LocalDB** и выполните `setup-localdb.ps1`. Для разработки в Visual Studio откройте исходный проект.
 
-Строка по умолчанию подключается к `(localdb)\MSSQLLocalDB` и создаёт базу `ScenaStudio`. Для обычного SQL Server задайте, например:
+Строка в `appsettings.json` подключается к `(localdb)\MSSQLLocalDB` и создаёт базу `ScenaStudioCoursework`. Настройка, запуск и устранение неполадок описаны в [LOCALDB_SETUP.md](LOCALDB_SETUP.md). Для обычного SQL Server задайте, например:
 
 ```json
 {
   "ConnectionStrings": {
-    "Studio": "Server=localhost;Database=ScenaStudio;Trusted_Connection=True;TrustServerCertificate=True;"
+    "Studio": "Server=localhost;Database=ScenaStudioCoursework;Trusted_Connection=True;TrustServerCertificate=True;"
   }
 }
 ```
+
+Гостевой каталог и служебный вход администратора разделены. Доступ и журнал запусков описаны в [ADMIN_PANEL.md](ADMIN_PANEL.md).
 
 ## Функции
 
@@ -42,3 +45,4 @@
 Исходники этого приложения размещены в GitHub-репозитории проекта. Для своей копии используйте `git clone https://github.com/Charliej3663/scena-avalonia-coursework.git`. Не добавляйте в репозиторий секреты подключения.
 
 Дополнительные материалы для пояснительной записки и защиты находятся в `COURSEWORK_GUIDE.md`.
+

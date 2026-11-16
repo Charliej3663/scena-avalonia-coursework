@@ -9,6 +9,7 @@ public sealed class StudioDbContext(DbContextOptions<StudioDbContext> options) :
     public DbSet<Enrollment> Enrollments => Set<Enrollment>();
     public DbSet<SupportMessage> SupportMessages => Set<SupportMessage>();
     public DbSet<StudioReview> Reviews => Set<StudioReview>();
+    public DbSet<AppVisit> AppVisits => Set<AppVisit>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -22,5 +23,8 @@ public sealed class StudioDbContext(DbContextOptions<StudioDbContext> options) :
         modelBuilder.Entity<SupportMessage>().Property(x => x.Reply).HasMaxLength(2000);
         modelBuilder.Entity<StudioReview>().Property(x => x.Name).HasMaxLength(100).IsRequired();
         modelBuilder.Entity<StudioReview>().Property(x => x.Text).HasMaxLength(2000).IsRequired();
+        modelBuilder.Entity<AppVisit>().Property(x => x.VisitorName).HasMaxLength(120).IsRequired();
+        modelBuilder.Entity<AppVisit>().HasIndex(x => x.StartedAt);
     }
 }
+

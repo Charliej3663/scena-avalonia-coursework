@@ -40,3 +40,12 @@ public sealed class StudioReview
     public int Rating { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.Now;
 }
+
+public sealed class AppVisit
+{
+    public int Id { get; set; }
+    public Guid SessionKey { get; set; }
+    public string VisitorName { get; set; } = "Гость";
+    public DateTime StartedAt { get; set; } = DateTime.Now;
+}
+

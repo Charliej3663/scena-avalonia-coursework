@@ -361,11 +361,22 @@ public sealed class MainWindow : Window
     private void ShowSchedule()
     {
         Heading("Расписание занятий", "Две группы на каждом направлении. Восемь встреч по 90 минут.");
-        foreach (var c in Courses) for (var g = 0; g < 2; g++)
-            _content.Children.Add(Card($"{c.Schedule[g]} · {c.Title}\n{c.Teacher} · {Money(c.Price)}", () => AddToCart(c, g)));
+        foreach (var c in Courses)
+        {
+            for (var g = 0; g < c.Schedule.Length; g++)
+            {
+                var group = g;
+                _content.Children.Add(Card($"{c.Schedule[group]} · {c.Title}\n{c.Teacher} · {Money(c.Price)}", () => AddToCart(c, group)));
+            }
+        }
     }
     private void AddToCart(Course course, int group)
     {
+        if ((uint)group >= (uint)course.Schedule.Length)
+        {
+            Message("Группа недоступна", "Обновите расписание и выберите другую группу.");
+            return;
+        }
         _cart[(course.Id, group)] = _cart.GetValueOrDefault((course.Id, group)) + 1; SavePreferences(); UpdateCartLabel();
         Message("Добавлено в корзину", course.Title + " · " + course.Schedule[group]);
     }

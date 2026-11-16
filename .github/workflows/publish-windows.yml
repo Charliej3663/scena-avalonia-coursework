@@ -43,11 +43,11 @@ jobs:
       - name: Publish latest release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.1
+          tag_name: v1.1.2
           target_commitish: ${{ github.sha }}
-          name: Сцена 1.1.1 — Windows x64
+          name: Сцена 1.1.2 — Windows x64
           body: |
-            Исправлено падение приложения при открытии корзины.
+            Исправлены падение при открытии корзины и ошибка выбора группы из расписания.
             Актуальная сборка из main включает защищённую панель администратора, журнал запусков, цветовые статусы и тост-уведомления.
             Для хранения данных требуется SQL Server Express LocalDB.
           files: artifacts/ScenaAvalonia-Windows-x64.zip

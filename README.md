@@ -11,7 +11,7 @@
 
 Из командной строки из папки проекта: `dotnet run`.
 
-Готовая Windows x64 версия — отдельный самодостаточный архив `ScenaAvalonia-Windows-x64-LocalDB.zip`; устанавливать .NET Runtime отдельно не нужно. Перед запуском приложения установите **SQL Server Express LocalDB** и выполните `setup-localdb.ps1`. Для разработки в Visual Studio откройте исходный проект.
+Готовую Windows x64 версию скачивайте со страницы [последнего GitHub-релиза](https://github.com/Charliej3663/scena-avalonia-coursework/releases/latest). Каждый push в `main` автоматически собирает самодостаточный архив `ScenaAvalonia-Windows-x64.zip` и публикует новый релиз. Устанавливать .NET Runtime отдельно не нужно; для работы с данными установите **SQL Server Express LocalDB**. Для разработки в Visual Studio откройте исходный проект.
 
 Строка в `appsettings.json` подключается к `(localdb)\MSSQLLocalDB` и создаёт базу `ScenaStudioCoursework`. Настройка, запуск и устранение неполадок описаны в [LOCALDB_SETUP.md](LOCALDB_SETUP.md). Для обычного SQL Server задайте, например:
 

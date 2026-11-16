@@ -1,0 +1,57 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish self-contained Windows x64 app
+        shell: pwsh
+        run: dotnet publish .\ScenaAvalonia.csproj --configuration Release --runtime win-x64 --self-contained true --output .\artifacts\publish
+      - name: Package app and setup guide
+        shell: pwsh
+        run: |
+          $publish = Resolve-Path '.\artifacts\publish'
+          Copy-Item '.\README.md' $publish
+          Copy-Item '.\ADMIN_PANEL.md' $publish
+          Copy-Item '.\LOCALDB_SETUP.md' $publish
+          Copy-Item '.\setup-localdb.ps1' $publish
+          Copy-Item '.\schema.sql' $publish
+          @'
+          Перед запуском приложения:
+          1. Установите SQL Server Express LocalDB.
+          2. Запустите setup-localdb.ps1 от своей обычной учётной записи Windows.
+          3. Откройте ScenaAvalonia.exe.
+          Первый вход администратора: пользователь admin; задайте новый пароль в окне первичной настройки.
+          Подробности — в LOCALDB_SETUP.md и ADMIN_PANEL.md.
+          '@ | Set-Content -Encoding UTF8 (Join-Path $publish 'ПЕРЕД_ЗАПУСКОМ.txt')
+          New-Item -ItemType Directory -Force '.\artifacts' | Out-Null
+          Compress-Archive -Path (Join-Path $publish '*') -DestinationPath '.\artifacts\ScenaAvalonia-Windows-x64.zip' -CompressionLevel Optimal
+      - name: Publish latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.1.0
+          target_commitish: ${{ github.sha }}
+          name: Сцена 1.1.0 — Windows x64
+          body: |
+            Актуальная версия настольного приложения театральной студии «Сцена».
+            Сборка из свежего кода main. Включает защищённый вход администратора, сводку и журнал запусков, цветовые статусы и тост-уведомления.
+            Для хранения данных требуется SQL Server Express LocalDB.
+          files: artifacts/ScenaAvalonia-Windows-x64.zip
+          overwrite_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
